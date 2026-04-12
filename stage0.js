@@ -56,10 +56,12 @@ app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({
         status: 'error',
-        message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+        message: 'Internal server error'
     });
 });
 
 app.listen(3000, () => {
     console.log('Server is running on port 3000');
 });
+
+module.exports = app;
