@@ -1,27 +1,19 @@
 const express = require('express');
-const cors = require('cors');
 const axios = require('axios');
+const { validateNameUtil } = require('./middlewares/validateName');
 
-const app = express();
+const router = express.Router();
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json());
-
-app.get('/api/classify', async (req, res) => {
+router.get('/classify', async (req, res) => {
     const { name } = req.query;
 
-    if (name === undefined || name === null) {
-        return res.status(400).json({ status: 'error', message: 'Missing name parameter' });
-    }
-    if (typeof name !== 'string') {
-        return res.status(422).json({ status: 'error', message: 'Name must be a string' });
-    }
-    if (name.trim() === '') {
-        return res.status(400).json({ status: 'error', message: 'Empty name parameter' });
+    // Validate name parameter
+    const validation = validateNameUtil(name);
+    if (!validation.isValid) {
+        return res.status(validation.error.status).json({
+            status: 'error',
+            message: validation.error.message
+        });
     }
 
     try {
@@ -52,14 +44,4 @@ app.get('/api/classify', async (req, res) => {
     }
 });
 
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({
-        status: 'error',
-        message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
-    });
-});
-
-app.listen(3000, () => {
-    console.log('Server is running on port 3000');
-});
+module.exports = router;
