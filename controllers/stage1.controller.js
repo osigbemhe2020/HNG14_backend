@@ -1,7 +1,6 @@
 
 const { extractProfileData } = require('../services/profile.service');
 const ProfileService = require('../services/profiles.service');
-const { parseNaturalQuery } = require('../services/NlqueryParser');
 const Profile = require('../models/profiles.model');
 
 
