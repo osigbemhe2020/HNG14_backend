@@ -1,3 +1,4 @@
+// profiles.model.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
@@ -26,6 +27,13 @@ const profileSchema = new Schema({
 }, {
     timestamps: true
 });
+
+// Performance indexes for common queries
+profileSchema.index({ gender: 1 });
+profileSchema.index({ age: 1 });
+profileSchema.index({ age_group: 1 });
+profileSchema.index({ country_id: 1 });
+profileSchema.index({ gender: 1, age: 1, country_id: 1 });
 
 const Profile = mongoose.model('Profile', profileSchema);
 

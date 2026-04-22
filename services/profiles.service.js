@@ -1,3 +1,4 @@
+// profiles.service.js
 const Profile = require('../models/profiles.model');
 const { parseNaturalQuery, buildMongooseQuery } = require('./NlqueryParser');
 
@@ -50,10 +51,8 @@ const getAllProfiles = async (filters, page, limit) => {
     profiles: profiles,
     pagination: {
       currentPage: page,
-      totalPages: Math.ceil(total / limit),
       totalProfiles: total,
-      hasNext: page < Math.ceil(total / limit),
-      hasPrev: page > 1,
+      
     }
   };
 };
@@ -93,10 +92,8 @@ const searchProfiles = async (naturalQuery, page, limit) => {
     profiles,
     pagination: {
       currentPage: page,
-      totalPages: Math.ceil(total / limit),
       totalProfiles: total,
-      hasNext: page < Math.ceil(total / limit),
-      hasPrev: page > 1,
+      
     }
   };
 };

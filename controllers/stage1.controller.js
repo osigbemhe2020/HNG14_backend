@@ -1,4 +1,4 @@
-
+// stage1.controller.js
 const { extractProfileData } = require('../services/profile.service');
 const ProfileService = require('../services/profiles.service');
 const Profile = require('../models/profiles.model');
@@ -49,8 +49,8 @@ const createProfile = async (req, res) => {
 
 const getAllProfiles = async (req, res) => {
 
-    const page  = parseInt(req.query.page)  || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+const limit = Math.min(parseInt(req.query.limit) || 10, 50);
 
     const { page: _, limit: __, ...filters } = req.query;
     try {
@@ -120,6 +120,9 @@ const searchProfiles = async (req, res) => {
         }
 
         const result = await ProfileService.searchProfiles(q.trim(), page, limit);
+        if (result.status === 'error') {
+    return res.status(400).json(result);
+}
         return res.status(200).json({
           status: 'success',
           page: page,
@@ -127,7 +130,7 @@ const searchProfiles = async (req, res) => {
           total: result.pagination.totalProfiles || 0,
           data: result.profiles || [],
           query: result.query,
-          parsedFilters: result.parsedFilters
+          interpreted_as: result.parsedFilters,
         });
     } catch (error) {
         console.error(error);
