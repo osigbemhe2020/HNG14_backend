@@ -5,11 +5,10 @@ const validateName = require("../middlewares/validateName");
 const router = express.Router();
 
 router.post("/profiles", validateName, Stage1Controller.createProfile);
+router.get("/profiles/search", Stage1Controller.searchProfiles);
 router.get("/profiles", Stage1Controller.getAllProfiles);
 router.get("/profiles/:id", Stage1Controller.getProfileById);
 router.delete("/profiles/:id", Stage1Controller.deleteProfile);
-
-
 
 module.exports = router;
 

@@ -3,13 +3,25 @@ const { Schema } = mongoose;
 
 const profileSchema = new Schema({
     id: { type: String, required: true, unique: true },
-    name: { type: String, required: true },
-    gender: { type: String, default: null },
+    name: { type: String, required: true, unique: true },
+    gender: { 
+        type: String, 
+        enum: ['male', 'female'], 
+        default: null 
+    },
     gender_probability: { type: Number, default: null },
-    sample_size: { type: Number, default: null },
     age: { type: Number, default: null },
-    age_group: { type: String, default: null },
-    country_id: { type: String, default: null },
+    age_group: { 
+        type: String, 
+        enum: ['child', 'teenager', 'adult', 'senior'], 
+        default: null 
+    },
+    country_id: { 
+        type: String, 
+        maxlength: 2,
+        default: null 
+    },
+    country_name: { type: String, default: null },
     country_probability: { type: Number, default: null }
 }, {
     timestamps: true

@@ -1,5 +1,7 @@
 
 const { extractProfileData } = require('../services/profile.service');
+const ProfileService = require('../services/profiles.service');
+const { parseNaturalQuery } = require('../services/NlqueryParser');
 const Profile = require('../models/profiles.model');
 
 
@@ -47,23 +49,23 @@ const createProfile = async (req, res) => {
 };
 
 const getAllProfiles = async (req, res) => {
-    const { gender, country_id, age_group } = req.query;
-    try {
-        let filter = {};
-        if (gender) filter.gender = { $regex: new RegExp('^' + gender.trim() + '$', 'i') };
-        if (country_id) filter.country_id = { $regex: new RegExp('^' + country_id.trim() + '$', 'i') };
-        if (age_group) filter.age_group = { $regex: new RegExp('^' + age_group.trim() + '$', 'i') };
 
-        const profiles = await Profile.find(filter);
-        return res.status(200).json({
-            status: 'success',
-            count: profiles.length,
-            data: profiles
+    const page  = parseInt(req.query.page)  || 1;
+    const limit = parseInt(req.query.limit) || 10;
+
+    const { page: _, limit: __, ...filters } = req.query;
+    try {
+    const result = await ProfileService.getAllProfiles(filters, page, limit);
+        res.status(200).json({
+          status: 'success',
+          page: page,
+          limit: limit,
+          total: result.pagination.totalProfiles || 0,
+          data: result.profiles || []
         });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ status: 'error', message: 'Internal server error' });
-    }
+      } catch (error) {
+        res.status(500).json({ message: "Server Error" });
+      }
 };
 
 const getProfileById = async (req, res) => {
@@ -105,9 +107,39 @@ const deleteProfile = async (req, res) => {
     }
 };
 
+const searchProfiles = async (req, res) => {
+    const { q } = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+
+    try {
+        if (!q || !q.trim()) {
+            return res.status(400).json({
+                status: 'error',
+                message: 'Query parameter "q" is required'
+            });
+        }
+
+        const result = await ProfileService.searchProfiles(q.trim(), page, limit);
+        return res.status(200).json({
+          status: 'success',
+          page: page,
+          limit: limit,
+          total: result.pagination.totalProfiles || 0,
+          data: result.profiles || [],
+          query: result.query,
+          parsedFilters: result.parsedFilters
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createProfile,
     getAllProfiles,
     getProfileById,
-    deleteProfile
+    deleteProfile,
+    searchProfiles
 };
