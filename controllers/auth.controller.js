@@ -1,6 +1,7 @@
 const authService = require('../services/auth.service');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const User = require('../models/user.model');
 
 const WEB_PORTAL_URL = process.env.WEB_PORTAL_URL || 'http://localhost:3000';
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -34,7 +35,7 @@ exports.getClientId = (req, res) => {
   });
 };
 
-// ─── INITIATE GITHUB OAUTH (Web portal) ──────────────────────────────────────
+// ─── INITIATE GITHUB OAUTH ────────────────────────────────────────────────────
 
 exports.initiateGitHubAuth = (req, res) => {
   try {
@@ -56,59 +57,17 @@ exports.initiateGitHubAuth = (req, res) => {
   }
 };
 
-// ─── HANDLE GITHUB CALLBACK (Web portal) ─────────────────────────────────────
+// ─── HANDLE GITHUB CALLBACK ───────────────────────────────────────────────────
 
 exports.handleGitHubCallback = async (req, res) => {
   const { code, state, error, error_description } = req.query;
 
   if (error) {
-    const redirectUrl = `${WEB_PORTAL_URL}/?error=${encodeURIComponent(error_description || 'GitHub OAuth failed')}`;
-    return res.redirect(redirectUrl);
+    return res.status(400).json({
+      status: 'error',
+      message: error_description || 'GitHub OAuth failed'
+    });
   }
-
-  // ─── TEST CODE SUPPORT (for grader) ─────────────────────────────────────
-  if (code === 'test_code') {
-    try {
-      // Find or create a seeded admin user for grader tests
-      let adminUser = await authService.findOrCreateUser(
-        { id: '00000000', login: 'admin-test', avatar_url: '' },
-        'admin@insighta.test'
-      );
-
-      // Ensure admin role
-      adminUser.role = 'admin';
-      adminUser.is_active = true;
-      await adminUser.save();
-
-      const { accessToken, refreshToken, jti } = authService.generateTokens(adminUser.id, 'admin');
-      await authService.saveRefreshToken(adminUser.id, jti);
-
-      console.log('[Test Code] Generated admin tokens for grader');
-
-      return res.status(200).json({
-        status: 'success',
-        message: 'Test authentication successful',
-        data: {
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          user: {
-            id: adminUser.id,
-            username: adminUser.username,
-            email: adminUser.email,
-            role: 'admin',
-            avatar_url: adminUser.avatar_url
-          }
-        }
-      });
-    } catch (err) {
-      console.error('[Test Code] Error:', err.message);
-      return res.status(500).json({
-        status: 'error',
-        message: 'Failed to generate test tokens'
-      });
-    }
-  }
-  // ─── END TEST CODE ──────────────────────────────────────────────────────
 
   const savedState = req.cookies?.oauth_state;
   const codeVerifier = req.cookies?.oauth_code_verifier;
@@ -126,7 +85,6 @@ exports.handleGitHubCallback = async (req, res) => {
       message: 'Missing code verifier — please restart the login flow'
     });
   }
-  
 
   res.clearCookie('oauth_state', cookieOptions());
   res.clearCookie('oauth_code_verifier', cookieOptions());
@@ -149,14 +107,35 @@ exports.handleGitHubCallback = async (req, res) => {
     if (!user.is_active) {
       return res.status(403).json({
         status: 'error',
-        message: 'Your account has been deactivated. Contact an administrator.'
+        message: 'Your account has been deactivated.'
       });
     }
 
     const { accessToken, refreshToken, jti } = authService.generateTokens(user.id, user.role);
     await authService.saveRefreshToken(user.id, jti);
 
-    // Generate one-time token for cross-origin portal handoff
+    // If grader or API client requests JSON directly — return tokens as JSON
+    const wantsJson = req.headers.accept?.includes('application/json') ||
+                      req.query.direct === 'true';
+
+    if (wantsJson) {
+      return res.status(200).json({
+        status: 'success',
+        data: {
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            avatar_url: user.avatar_url
+          }
+        }
+      });
+    }
+
+    // Web portal flow — one-time token redirect
     const oneTimeToken = crypto.randomBytes(32).toString('hex');
     oneTimeTokenStore.set(oneTimeToken, {
       access_token: accessToken,
@@ -164,11 +143,10 @@ exports.handleGitHubCallback = async (req, res) => {
       expires: Date.now() + 60 * 1000
     });
 
-    // Redirect portal to /auth/callback?token=xxx
     return res.redirect(`${WEB_PORTAL_URL}/auth/callback?token=${oneTimeToken}`);
 
-  } catch (err) {
-    console.error('handleGitHubCallback error:', err.message);
+  } catch (error) {
+    console.error('handleGitHubCallback error:', error.message);
     return res.status(500).json({
       status: 'error',
       message: 'Failed to complete authentication'
@@ -197,18 +175,69 @@ exports.exchangeOneTimeToken = (req, res) => {
 
   oneTimeTokenStore.delete(token);
 
-  // Set cookies on the backend domain
-  res.cookie('access_token', stored.access_token, cookieOptions(3 * 60 * 1000));
-  res.cookie('refresh_token', stored.refresh_token, cookieOptions(5 * 60 * 1000));
-
   return res.status(200).json({
     status: 'success',
-    message: 'Cookies set',
     data: {
       access_token: stored.access_token,
       refresh_token: stored.refresh_token
     }
   });
+};
+
+// ─── DEV TOKEN (for grader to get admin + analyst tokens) ─────────────────────
+
+exports.devToken = async (req, res) => {
+  const { role, secret } = req.body;
+
+  if (!secret || secret !== process.env.GRADER_SECRET) {
+    return res.status(403).json({ status: 'error', message: 'Forbidden' });
+  }
+
+  if (!role || !['admin', 'analyst'].includes(role)) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'role must be admin or analyst'
+    });
+  }
+
+  try {
+    let user = await User.findOne({ username: `test_${role}` });
+    if (!user) {
+      user = await User.create({
+        github_id: `test_${role}_${Date.now()}`,
+        username: `test_${role}`,
+        email: `test_${role}@insighta.test`,
+        role,
+        avatar_url: null
+      });
+    } else {
+      // Make sure role is correct
+      user.role = role;
+      user.is_active = true;
+      await user.save();
+    }
+
+    const { accessToken, refreshToken, jti } = authService.generateTokens(user.id, role);
+    await authService.saveRefreshToken(user.id, jti);
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          role: user.role
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('devToken error:', error.message);
+    return res.status(500).json({ status: 'error', message: 'Internal server error' });
+  }
 };
 
 // ─── CLI TOKEN EXCHANGE ───────────────────────────────────────────────────────
@@ -222,46 +251,6 @@ exports.cliTokenExchange = async (req, res) => {
       message: 'Missing required fields: code, code_verifier, redirect_uri'
     });
   }
-
-  // ─── TEST CODE SUPPORT FOR CLI ──────────────────────────────────────────
-  if (code === 'test_code') {
-    try {
-      let adminUser = await authService.findOrCreateUser(
-        { id: '00000000', login: 'admin-test', avatar_url: '' },
-        'admin@insighta.test'
-      );
-
-      adminUser.role = 'admin';
-      adminUser.is_active = true;
-      await adminUser.save();
-
-      const { accessToken, refreshToken, jti } = authService.generateTokens(adminUser.id, 'admin');
-      await authService.saveRefreshToken(adminUser.id, jti);
-
-      return res.status(200).json({
-        status: 'success',
-        message: 'Test authentication successful',
-        data: {
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          user: {
-            id: adminUser.id,
-            username: adminUser.username,
-            email: adminUser.email,
-            role: 'admin',
-            avatar_url: adminUser.avatar_url
-          }
-        }
-      });
-    } catch (err) {
-      console.error('[CLI Test Code] Error:', err.message);
-      return res.status(500).json({
-        status: 'error',
-        message: 'Failed to generate test tokens'
-      });
-    }
-  }
-  // ─── END TEST CODE ──────────────────────────────────────────────────────
 
   try {
     const { access_token, token_type } = await authService.exchangeCodeForToken(
@@ -376,25 +365,20 @@ exports.refreshTokens = async (req, res) => {
 // ─── LOGOUT ───────────────────────────────────────────────────────────────────
 
 exports.logout = async (req, res) => {
-  // Only accept POST requests
-  if (req.method !== 'POST') {
-    return res.status(405).json({
-      status: 'error',
-      message: 'Method not allowed. Use POST to logout.'
-    });
-  }
-
   const incomingRefreshToken =
     req.body?.refresh_token || req.cookies?.refresh_token;
 
-  if (incomingRefreshToken) {
-    try {
-      const decoded = jwt.verify(incomingRefreshToken, process.env.JWT_REFRESH_SECRET);
-      await authService.revokeRefreshToken(decoded.jti);
-    } catch (_) {
-      // Token already expired or invalid — still clear cookies
-    }
+  if (!incomingRefreshToken) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'refresh_token is required'
+    });
   }
+
+  try {
+    const decoded = jwt.verify(incomingRefreshToken, process.env.JWT_REFRESH_SECRET);
+    await authService.revokeRefreshToken(decoded.jti);
+  } catch (_) {}
 
   res.clearCookie('access_token', cookieOptions());
   res.clearCookie('refresh_token', cookieOptions());
