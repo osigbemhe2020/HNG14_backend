@@ -22,5 +22,6 @@ router.post('/github/token', authController.cliTokenExchange);
 router.post('/refresh', authController.refreshTokens);
 router.post('/logout', authController.logout);
 router.get('/me', verifyToken, authController.whoami);
+router.post('/set-cookies', authController.setCookies);
 
 module.exports = router;
