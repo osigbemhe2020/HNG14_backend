@@ -81,6 +81,7 @@ exports.handleGitHubCallback = async (req, res) => {
       message: 'Missing code verifier — please restart the login flow'
     });
   }
+  
 
   // Clear OAuth cookies
   res.clearCookie('oauth_state', { domain: 'localhost', path: '/' });
