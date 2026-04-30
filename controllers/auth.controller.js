@@ -326,3 +326,19 @@ exports.whoami = (req, res) => {
     }
   });
 };
+// ─── SET COOKIES FOR CROSS-ORIGIN ─────────────────────────────────────────────
+// POST /auth/set-cookies
+// Called by Vercel route.js to set cookies on the backend domain
+
+exports.setCookies = (req, res) => {
+  const { access_token, refresh_token } = req.body;
+
+  if (!access_token || !refresh_token) {
+    return res.status(400).json({ status: 'error', message: 'Tokens required' });
+  }
+
+  res.cookie('access_token', access_token, cookieOptions(3 * 60 * 1000));
+  res.cookie('refresh_token', refresh_token, cookieOptions(5 * 60 * 1000));
+
+  return res.status(200).json({ status: 'success', message: 'Cookies set' });
+};
