@@ -1,206 +1,449 @@
-# Natural Language Profile Search — Parser Documentation
+# Insighta Labs+ — Backend API
 
-## Overview
-
-`GET /api/profiles/search?q=<query>`
-
-This endpoint accepts plain English queries and converts them into structured MongoDB filters using a **rule-based parser** (`nlQueryParser.js`). No AI or LLMs are involved. The parser works by scanning the query string for known keywords and patterns, then assembling a filter object that is passed directly to Mongoose.
+The backend for the Insighta Labs+ Profile Intelligence System. Built with Node.js and Express, deployed on Northflank. Powers both the CLI tool and the web portal.
 
 ---
 
-## 1. Parsing Approach
-
-### How it works
-
-The query string is normalized (lowercased, whitespace collapsed) and then passed through five sequential stages. Each stage checks for its own keyword set independently, so multiple filters can be extracted from a single query.
+## Live URL
 
 ```
-Raw query → normalize → [gender] → [age group] → [young] → [above/below] → [country] → Mongoose query
+https://site--hng14-backend--nlrjqkv9zhwn.code.run
 ```
 
-Each stage writes into a shared `filters` object. At the end, if no stage matched anything, the parser returns an error.
+---
+
+## Table of Contents
+
+- [System Architecture](#system-architecture)
+- [Authentication Flow](#authentication-flow)
+- [Token Handling](#token-handling)
+- [Role Enforcement](#role-enforcement)
+- [API Versioning](#api-versioning)
+- [CLI Usage](#cli-usage)
+- [Natural Language Parsing](#natural-language-parsing)
+- [API Reference](#api-reference)
+- [Running Locally](#running-locally)
+- [Environment Variables](#environment-variables)
+- [Project Structure](#project-structure)
 
 ---
 
-### Stage 1 — Gender
+## System Architecture
 
-Detected by matching synonyms against two keyword banks.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Insighta Labs+                           │
+├───────────────────┬─────────────────────┬───────────────────────┤
+│   CLI Tool        │   Web Portal        │   Backend API         │
+│   (Local)         │   (Vercel)          │   (Northflank)        │
+│                   │                     │                       │
+│  insighta login   │  Next.js App Router │  Express.js           │
+│  insighta profiles│  HTTP-only cookies  │  MongoDB Atlas        │
+│  insighta export  │  Server-side auth   │  JWT tokens           │
+│                   │                     │  Rate limiting        │
+│  ~/.insighta/     │  /auth/callback     │  RBAC middleware      │
+│  credentials.json │  (token exchange)   │  NL query parser      │
+└───────────────────┴─────────────────────┴───────────────────────┘
+```
 
-| Filter value | Keywords matched |
-|---|---|
-| `male` | male, males, man, men, boy, boys, gentleman, gentlemen |
-| `female` | female, females, woman, women, girl, girls, lady, ladies |
-
-**Both genders present** (e.g. *"male and female teenagers"*) → no `gender` filter is applied, but the query is still considered valid and the other stages continue.
-
----
-
-### Stage 2 — Age Group
-
-Matched against four keyword banks. Maps directly to the `age_group` enum on the schema.
-
-| `age_group` value | Keywords matched |
-|---|---|
-| `child` | child, children, kid, kids |
-| `teenager` | teenager, teenagers, teen, teens, adolescent, adolescents |
-| `adult` | adult, adults |
-| `senior` | senior, seniors, elderly, elder, old, aged |
-
-Only the **first match** is used. If multiple age group words appear in the same query, the first one encountered wins.
+**Data flow:**
+- CLI → talks directly to backend via Bearer token in Authorization header
+- Web portal → talks to backend via HTTP-only cookies set server-side
+- Both → same backend, same database, same JWT validation
 
 ---
 
-### Stage 3 — "young" (special case)
+## Authentication Flow
 
-The word *young* (and synonyms: *youth*, *youthful*) is treated as a **shorthand age range**, not an age group. It is intentionally **not** stored as `age_group`.
+### Web Portal Flow
 
-| Keyword | Maps to |
-|---|---|
-| young, youth, youthful | `min_age: 16, max_age: 24` |
+```
+1. User clicks "Continue with GitHub" on portal
+2. Portal redirects to GET /auth/github on backend
+3. Backend generates PKCE (code_verifier + code_challenge) and state
+4. Backend stores state + code_verifier in short-lived HTTP-only cookies
+5. Backend redirects browser to GitHub OAuth authorization page
+6. User approves on GitHub
+7. GitHub redirects to GET /auth/github/callback on backend
+8. Backend validates state cookie to prevent CSRF
+9. Backend exchanges code + code_verifier with GitHub for access token
+10. Backend fetches GitHub user profile and emails
+11. Backend upserts user in MongoDB (creates if new, updates if existing)
+12. Backend generates JWT access token (3 min) + refresh token (5 min)
+13. Backend stores refresh token JTI in MongoDB
+14. Backend generates a one-time token (60 second expiry) stored in memory
+15. Backend redirects portal to /auth/callback?token=<one-time-token>
+16. Next.js route.js (server-side) calls GET /auth/exchange?token=xxx
+17. Backend returns real JWT tokens, deletes one-time token immediately
+18. Next.js sets HTTP-only cookies on the portal domain
+19. User lands on /dashboard — authenticated
+```
 
-If an `age_group` was already set in Stage 2, it is **removed** when *young* is detected, because *young* implies a numeric range that supersedes a categorical group.
+### CLI Flow
 
----
-
-### Stage 4 — Above / Below (numeric age modifiers)
-
-The parser scans for a number following directional keywords.
-
-| Direction | Keywords | Filter key |
-|---|---|---|
-| Above | above, over, older than, greater than, more than | `min_age` |
-| Below | below, under, younger than, less than | `max_age` |
-
-**Interaction with "young":** If *young* set `min_age: 16` and the query also says *above 20*, the parser takes the **larger** of the two values (`min_age = 20`). Similarly, *below* takes the **smaller** of any existing `max_age`.
-
-Example resolutions:
-
-| Query | min_age | max_age |
-|---|---|---|
-| `young males` | 16 | 24 |
-| `young males above 20` | 20 | 24 |
-| `young females below 22` | 16 | 22 |
-| `females above 30` | 30 | — |
-
----
-
-### Stage 5 — Country
-
-The parser maintains a dictionary of ~150 country names mapped to their ISO 3166-1 alpha-2 codes. Matching uses **whole-word boundary checks** and resolves **longest match first** to avoid partial collisions (e.g. *guinea* matching inside *guinea-bissau*).
-
-A selection of supported aliases:
-
-| Query term(s) | `country_id` |
-|---|---|
-| nigeria | NG |
-| angola | AO |
-| kenya | KE |
-| south africa | ZA |
-| united states, usa, america | US |
-| united kingdom, uk | GB |
-| united arab emirates, uae | AE |
-| dr congo, drc, democratic republic of congo | CD |
-| ivory coast, cote d'ivoire | CI |
-
-The full dictionary covers Africa, Asia, Europe, the Americas, and the Middle East.
+```
+1. User runs: insighta login
+2. CLI generates PKCE (code_verifier + code_challenge) and state locally
+3. CLI starts local HTTP server on random port (e.g. 9876)
+4. CLI fetches GitHub Client ID from GET /auth/github/client-id
+5. CLI builds GitHub OAuth URL directly with localhost:9876/callback as redirect_uri
+6. CLI opens browser to GitHub OAuth authorization page
+7. User approves on GitHub
+8. GitHub redirects to http://localhost:9876/callback
+9. CLI local server captures the code and state
+10. CLI validates state matches what it generated
+11. CLI sends code + code_verifier + redirect_uri to POST /auth/github/token
+12. Backend exchanges code + code_verifier with GitHub
+13. Backend upserts user, generates JWT tokens, stores refresh token
+14. Backend returns tokens + user info as JSON
+15. CLI saves to ~/.insighta/credentials.json with permissions 600
+```
 
 ---
 
-### Query Examples
+## Token Handling
 
-| Query | Resulting filters |
-|---|---|
-| `young males from nigeria` | `gender=male, min_age=16, max_age=24, country_id=NG` |
-| `females above 30` | `gender=female, min_age=30` |
-| `people from angola` | `country_id=AO` |
-| `adult males from kenya` | `gender=male, age_group=adult, country_id=KE` |
-| `male and female teenagers above 17` | `age_group=teenager, min_age=17` |
-| `young males above 20 from ghana` | `gender=male, min_age=20, max_age=24, country_id=GH` |
-| `senior women` | `gender=female, age_group=senior` |
+### Token Types
 
----
+| Token | Expiry | Purpose | Storage |
+|---|---|---|---|
+| Access token | 3 minutes | Authenticate API requests | CLI: credentials.json / Web: HTTP-only cookie |
+| Refresh token | 5 minutes | Obtain new token pair | CLI: credentials.json / Web: HTTP-only cookie |
 
-### Error Response
-
-Any query that produces zero matched filters returns:
+### Token Structure (JWT payload)
 
 ```json
+// Access token
 {
-  "status": "error",
-  "message": "Unable to interpret query"
+  "sub": "019dd96f-6865-7687-916b-a74a109feb21",
+  "role": "analyst",
+  "type": "access",
+  "iat": 1234567890,
+  "exp": 1234568070
+}
+
+// Refresh token
+{
+  "sub": "019dd96f-6865-7687-916b-a74a109feb21",
+  "role": "analyst",
+  "type": "refresh",
+  "jti": "a1b2c3d4e5f6...",
+  "iat": 1234567890,
+  "exp": 1234568190
 }
 ```
 
+### Two separate secrets
+
+Access tokens are signed with `JWT_ACCESS_SECRET` and refresh tokens with `JWT_REFRESH_SECRET`. This means a stolen refresh token cannot be used as an access token — the server rejects it with a signature error.
+
+### Refresh token rotation
+
+Every time a refresh token is used, it is immediately invalidated in MongoDB and a new token pair is issued. If an already-used refresh token is presented, the server returns 401. This prevents replay attacks.
+
+### Token revocation
+
+Refresh tokens are stored in MongoDB with a `used` boolean and `expiresAt` date. MongoDB TTL index automatically deletes expired tokens — no manual cleanup needed.
+
 ---
 
-### Response Shape (success)
+## Role Enforcement
+
+Two roles exist: `admin` and `analyst`. All new users are assigned `analyst` by default. Role is embedded in the JWT payload and re-validated on every request.
+
+### Endpoint permissions
+
+| Endpoint | Method | Required Role |
+|---|---|---|
+| `/api/profiles` | POST | admin |
+| `/api/profiles/:id` | DELETE | admin |
+| `/api/profiles` | GET | analyst, admin |
+| `/api/profiles/:id` | GET | analyst, admin |
+| `/api/profiles/search` | GET | analyst, admin |
+| `/api/profiles/export` | GET | analyst, admin |
+
+### How it works
+
+```
+Request → verifyToken middleware → checkRole middleware → controller
+
+verifyToken:
+  1. Extract Bearer token from Authorization header
+  2. Verify JWT signature with JWT_ACCESS_SECRET
+  3. Check user exists in DB and is_active = true
+  4. Attach user to req.user
+
+checkRole(['admin']):
+  1. Read req.user.role
+  2. If role not in allowed list → 403 Insufficient permissions
+  3. Otherwise → next()
+```
+
+### Promoting a user to admin
+
+There is no API endpoint for role promotion — it must be done directly in MongoDB to prevent privilege escalation:
+
+```js
+db.users.updateOne(
+  { username: "target-username" },
+  { $set: { role: "admin" } }
+)
+```
+
+---
+
+## API Versioning
+
+All `/api/*` routes require the `X-API-Version` header. Missing or unsupported versions return 400.
+
+```bash
+# Correct
+curl -H "X-API-Version: 1" https://your-backend.com/api/profiles
+
+# Missing header → 400
+curl https://your-backend.com/api/profiles
+```
+
+Supported versions: `1`
+
+---
+
+## CLI Usage
+
+Install and use the Insighta CLI:
+
+```bash
+# Install globally
+git clone https://github.com/your-username/insighta-cli.git
+cd insighta-cli && npm install && npm link
+
+# Set backend URL
+export INSIGHTA_API_URL=https://site--hng14-backend--nlrjqkv9zhwn.code.run
+```
+
+### Auth commands
+
+```bash
+insighta login       # GitHub OAuth login — opens browser
+insighta whoami      # Show current user info
+insighta logout      # Logout and clear credentials
+```
+
+### Profile commands
+
+```bash
+# List profiles
+insighta profiles list
+insighta profiles list --gender male --country NG --page 2 --limit 20
+insighta profiles list --age-group adult --sort-by age --order asc
+
+# Get single profile
+insighta profiles get <id>
+
+# Natural language search
+insighta profiles search "young males from nigeria"
+insighta profiles search "adult women from kenya above 30"
+
+# Create profile (admin only)
+insighta profiles create "John"
+
+# Delete profile (admin only)
+insighta profiles delete <id>
+
+# Export to CSV
+insighta profiles export
+insighta profiles export --gender female --output women.csv
+insighta profiles export --country NG --output nigeria.csv
+```
+
+### Auto token refresh
+
+The CLI automatically refreshes expired access tokens before every API call. If the refresh token is also expired, the user is prompted to run `insighta login` again.
+
+---
+
+## Natural Language Parsing
+
+`GET /api/profiles/search?q=<query>`
+
+The search endpoint accepts plain English queries and converts them to MongoDB filters using a rule-based parser (`NlqueryParser.js`). No AI or LLMs are used.
+
+### Parsing pipeline
+
+```
+Raw query → normalize → [gender] → [age group] → [young] → [above/below] → [country] → MongoDB query
+```
+
+### Supported filters
+
+**Gender**
+
+| Query terms | Filter |
+|---|---|
+| male, man, men, boy, boys, gentleman | `gender: "male"` |
+| female, woman, women, girl, girls, lady | `gender: "female"` |
+
+**Age group**
+
+| Query terms | Filter |
+|---|---|
+| child, children, kid, kids | `age_group: "child"` |
+| teenager, teen, adolescent | `age_group: "teenager"` |
+| adult, adults | `age_group: "adult"` |
+| senior, elderly, elder, old, aged | `age_group: "senior"` |
+
+**Age modifiers**
+
+| Pattern | Filter |
+|---|---|
+| `above N`, `over N`, `older than N` | `age: { $gte: N }` |
+| `below N`, `under N`, `younger than N` | `age: { $lte: N }` |
+| `young`, `youth` | `age: { $gte: 16, $lte: 24 }` |
+
+**Country** — ~150 country names mapped to ISO 3166-1 alpha-2 codes. Longest-match-first to avoid partial collisions.
+
+### Query examples
+
+| Query | Filters applied |
+|---|---|
+| `young males from nigeria` | gender=male, min_age=16, max_age=24, country_id=NG |
+| `adult women from kenya` | gender=female, age_group=adult, country_id=KE |
+| `females above 30` | gender=female, min_age=30 |
+| `senior males` | gender=male, age_group=senior |
+| `people from ghana` | country_id=GH |
+| `young males above 20 from nigeria` | gender=male, min_age=20, max_age=24, country_id=NG |
+
+### Limitations
+
+- No negation (`not from nigeria` is not supported)
+- No OR logic (`males from kenya OR females from ghana`)
+- No city, region, or continent names — country names only
+- No demonyms (`Nigerian males` will not match — use `males from nigeria`)
+- No fuzzy matching — typos are not corrected
+- `between X and Y` age range syntax not supported
+
+---
+
+## API Reference
+
+### Auth
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/auth/github` | Initiate GitHub OAuth (web portal) |
+| GET | `/auth/github/callback` | GitHub OAuth callback (web portal) |
+| GET | `/auth/github/client-id` | Get CLI OAuth client ID |
+| POST | `/auth/github/token` | CLI token exchange |
+| GET | `/auth/exchange` | One-time token exchange (portal) |
+| POST | `/auth/refresh` | Rotate token pair |
+| POST | `/auth/logout` | Revoke refresh token |
+| GET | `/auth/me` | Get current user |
+
+### Profiles (all require `X-API-Version: 1` and Bearer token)
+
+| Method | Endpoint | Role | Description |
+|---|---|---|---|
+| POST | `/api/profiles` | admin | Create profile |
+| GET | `/api/profiles` | any | List with filters + pagination |
+| GET | `/api/profiles/search` | any | Natural language search |
+| GET | `/api/profiles/export` | any | Export as CSV |
+| GET | `/api/profiles/:id` | any | Get single profile |
+| DELETE | `/api/profiles/:id` | admin | Delete profile |
+
+### Pagination response shape
 
 ```json
 {
   "status": "success",
-  "query": "young males from nigeria",
-  "interpreted_as": {
-    "gender": "male",
-    "min_age": 16,
-    "max_age": 24,
-    "country_id": "NG"
+  "page": 1,
+  "limit": 10,
+  "total": 2027,
+  "total_pages": 203,
+  "links": {
+    "self": "/api/profiles?page=1&limit=10",
+    "next": "/api/profiles?page=2&limit=10",
+    "prev": null,
+    "first": "/api/profiles?page=1&limit=10",
+    "last": "/api/profiles?page=203&limit=10"
   },
-  "pagination": {
-    "total": 412,
-    "page": 1,
-    "limit": 20,
-    "pages": 21
-  },
-  "data": [ ... ]
+  "data": [...]
 }
 ```
 
-The `interpreted_as` field is returned on every successful response so clients can display or debug what the parser understood.
+---
+
+## Running Locally
+
+```bash
+git clone https://github.com/your-username/HNG14_backend.git
+cd HNG14_backend
+npm install
+cp .env.example .env
+# Fill in .env values
+npm run dev
+```
+
+Server starts on `http://localhost:3002`
 
 ---
 
-## 2. Limitations and Edge Cases
+## Environment Variables
 
-### Age handling
+```env
+# Server
+PORT=3002
+NODE_ENV=development
 
-**No range syntax.** Queries like *"between 20 and 35"* or *"ages 18 to 25"* are not supported. Only `above N` and `below N` patterns work.
+# MongoDB
+MONGODB_URI=mongodb+srv://...
 
-**"Young" is a parsing alias, not a data value.** The word *young* maps to `min_age=16, max_age=24` purely at query time. Documents do not store a *young* age group, so this filter works by querying the numeric `age` field. If a document has `age: null`, it will not match a young query even if it would otherwise qualify.
+# JWT
+JWT_ACCESS_SECRET=<64-byte-hex-string>
+JWT_REFRESH_SECRET=<64-byte-hex-string>
 
-**"Old" is mapped to senior.** The word *old* triggers `age_group=senior` rather than a numeric filter. Queries like *"old people above 60"* will produce `age_group=senior, min_age=60` which may return fewer results than expected since `age_group` and `age` are separate fields that may not always align.
+# GitHub OAuth — Backend App (web portal)
+GITHUB_CLIENT_ID=<backend-oauth-app-client-id>
+GITHUB_CLIENT_SECRET=<backend-oauth-app-client-secret>
+GITHUB_REDIRECT_URI=http://localhost:3002/auth/github/callback
 
-**No age range inference from age groups.** Saying *"adults"* sets `age_group=adult` but does not automatically add `min_age=18`. The parser trusts the stored `age_group` field and does not second-guess it with numeric bounds.
+# GitHub OAuth — CLI App
+GITHUB_CLI_CLIENT_ID=<cli-oauth-app-client-id>
 
----
-
-### Gender handling
-
-**No non-binary or gender-neutral support.** The parser only recognises `male` and `female`. Terms like *non-binary*, *they/them*, *gender-neutral*, or *people* (used as a gender signal) are silently ignored.
-
-**"People" is not a gender keyword.** *"people from angola"* correctly returns no gender filter and matches everyone. But *"people"* used with intent like *"all people"* adds nothing — it is simply ignored.
-
----
-
-### Country handling
-
-**Only country names, no cities or regions.** Queries like *"people from Lagos"* or *"males from East Africa"* will not match any country. City, state, region, and continent names are not in the dictionary.
-
-**No demonym support.** *"Nigerian males"* will not match. Only the country name form works (*"males from nigeria"*). Demonyms (Nigerian, Kenyan, Ghanaian, etc.) are not in the keyword dictionary.
-
-**Ambiguous short names.** Some countries share partial names. The longest-match strategy handles most cases (e.g. *guinea* vs *guinea-bissau*) but edge cases like *"congo"* default to Republic of Congo (`CG`), not DRC (`CD`). Use *"dr congo"* or *"drc"* explicitly for DRC.
-
-**No ISO code input.** Typing `NG` or `KE` directly in the query string will not be recognised. The parser only reads country names, not codes.
+# URLs
+BASE_URL=http://localhost:3002
+WEB_PORTAL_URL=http://localhost:3000
+```
 
 ---
 
-### Query structure
+## Project Structure
 
-**No negation.** Queries like *"males not from nigeria"* or *"adults excluding seniors"* are not supported. The *not* / *excluding* / *except* keywords are silently ignored and the positive filter is applied anyway.
-
-**No OR logic across filters.** Every matched filter is ANDed together in the Mongoose query. There is no way to express *"males from kenya OR females from ghana"* in a single query.
-
-**Only one age group per query.** If the query contains both *teenager* and *adult*, only the first matched keyword is used. The second is silently ignored.
-
-**Typos and misspellings are not corrected.** *"nigria"* will not match Nigeria. The parser does exact whole-word matching with no fuzzy or phonetic fallback.
-
-**Conjunctions are not parsed grammatically.** The parser does not understand sentence structure. *"males above 30 and females below 25"* will not split into two sub-queries. It will extract `gender=male` (first gender match), `min_age=30`, and `max_age=25`, which is likely not what was intended.
+```
+├── controllers/
+│   ├── auth.controller.js      # OAuth, token exchange, refresh, logout, whoami
+│   └── stage1.controller.js    # Profile CRUD, search, export
+├── middlewares/
+│   ├── auth.middleware.js       # JWT verification + user attachment
+│   ├── role.middleware.js       # RBAC — admin/analyst enforcement
+│   ├── apiVersion.middleware.js # X-API-Version header validation
+│   ├── rateLimit.middleware.js  # 10/min auth, 60/min API
+│   ├── logger.middleware.js     # Morgan request logging
+│   └── csrf.middleware.js       # CSRF token validation
+├── models/
+│   ├── user.model.js            # User schema (id, github_id, role, is_active)
+│   ├── profiles.model.js        # Profile schema with all enrichment fields
+│   └── refreshToken.model.js    # Refresh token store with TTL index
+├── routes/
+│   ├── auth.route.js            # All auth endpoints
+│   └── stage1.route.js          # All profile endpoints
+├── services/
+│   ├── auth.service.js          # PKCE, GitHub API, JWT generation, token DB ops
+│   ├── profile.service.js       # External API calls (Genderize, Agify, Nationalize)
+│   ├── profiles.service.js      # DB queries, filtering, pagination, CSV export
+│   └── NlqueryParser.js         # Natural language → MongoDB filter parser
+├── config/
+│   └── db.js                    # MongoDB connection
+├── app.js                       # Express app setup, middleware chain
+├── server.js                    # Server entry point
+└── stage0.js                    # Stage 0 classify endpoint
+```
