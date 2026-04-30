@@ -27,9 +27,17 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build Next.js app
-        run: npm run build
+      - name: Check app loads without errors
+        run: node -e "require('./app')"
         env:
-          NEXT_PUBLIC_BACKEND_URL: https://placeholder-for-ci.example.com
-          BACKEND_URL: https://placeholder-for-ci.example.comocalhost:3000
+          PORT: 3002
+          NODE_ENV: test
+          MONGODB_URI: mongodb://localhost:27017/test
+          JWT_ACCESS_SECRET: test_access_secret_for_ci_only
+          JWT_REFRESH_SECRET: test_refresh_secret_for_ci_only
+          GITHUB_CLIENT_ID: test_client_id
+          GITHUB_CLIENT_SECRET: test_client_secret
+          GITHUB_REDIRECT_URI: http://localhost:3002/auth/github/callback
+          GITHUB_CLI_CLIENT_ID: test_cli_client_id
+          WEB_PORTAL_URL: http://localhost:3000
           BASE_URL: http://localhost:3002
