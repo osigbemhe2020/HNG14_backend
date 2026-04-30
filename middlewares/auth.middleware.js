@@ -1,32 +1,35 @@
-
 const jwt = require('jsonwebtoken');
 const User = require('../models/user.model');
 
 // Verify JWT and check user active status
 const verifyToken = async (req, res, next) => {
   try {
-    // Extract Authorization header
-    const authHeader = req.headers.authorization;
+    let token = null;
+
+    // 1. Check cookie first (web portal uses HTTP-only cookies)
+    if (req.cookies?.access_token) {
+      token = req.cookies.access_token;
+    }
     
-    if (!authHeader) {
-      return res.status(401).json({
-        statusCode: 401,
-        message: 'Authorization header missing',
-        data: null
-      });
+    // 2. Fall back to Authorization header (CLI uses Bearer tokens)
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      
+      if (authHeader) {
+        const parts = authHeader.split(' ');
+        if (parts.length === 2 && parts[0] === 'Bearer') {
+          token = parts[1];
+        }
+      }
     }
 
-    // Extract Bearer token
-    const parts = authHeader.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    // No token found in either place
+    if (!token) {
       return res.status(401).json({
-        statusCode: 401,
-        message: 'Invalid authorization header format. Use: Bearer <token>',
-        data: null
+        status: 'error',
+        message: 'Authorization header missing'
       });
     }
-
-    const token = parts[1];
 
     // Verify JWT
     let decoded;
@@ -35,16 +38,14 @@ const verifyToken = async (req, res, next) => {
     } catch (error) {
       if (error.name === 'TokenExpiredError') {
         return res.status(401).json({
-          statusCode: 401,
-          message: 'Token has expired',
-          data: null
+          status: 'error',
+          message: 'Token has expired'
         });
       }
       if (error.name === 'JsonWebTokenError') {
         return res.status(401).json({
-          statusCode: 401,
-          message: 'Invalid token',
-          data: null
+          status: 'error',
+          message: 'Invalid token'
         });
       }
       throw error;
@@ -55,18 +56,16 @@ const verifyToken = async (req, res, next) => {
     
     if (!user) {
       return res.status(401).json({
-        statusCode: 401,
-        message: 'User not found',
-        data: null
+        status: 'error',
+        message: 'User not found'
       });
     }
 
     // Check if user is active
     if (!user.is_active) {
       return res.status(403).json({
-        statusCode: 403,
-        message: 'User account is not active',
-        data: null
+        status: 'error',
+        message: 'User account is not active'
       });
     }
 
@@ -87,9 +86,8 @@ const verifyToken = async (req, res, next) => {
   } catch (error) {
     console.error('Auth middleware error:', error.message);
     res.status(500).json({
-      statusCode: 500,
-      message: 'Authentication verification failed',
-      data: null
+      status: 'error',
+      message: 'Authentication verification failed'
     });
   }
 };

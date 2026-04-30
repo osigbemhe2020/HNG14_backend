@@ -23,18 +23,20 @@ exports.initiateGitHubAuth = (req, res) => {
 
     res.cookie('oauth_state', state, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: false,
       sameSite: 'lax',
-      maxAge: 10 * 60 * 1000,
-      path: '/'
+      domain: 'localhost',
+      path: '/',
+      maxAge: 10 * 60 * 1000
     });
 
     res.cookie('oauth_code_verifier', codeVerifier, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: false,
       sameSite: 'lax',
-      maxAge: 10 * 60 * 1000,
-      path: '/'
+      domain: 'localhost',
+      path: '/',
+      maxAge: 10 * 60 * 1000
     });
 
     const redirectUrl = authService.buildGitHubAuthUrl(state, codeChallenge);
@@ -80,8 +82,9 @@ exports.handleGitHubCallback = async (req, res) => {
     });
   }
 
-  res.clearCookie('oauth_state');
-  res.clearCookie('oauth_code_verifier');
+  // Clear OAuth cookies
+  res.clearCookie('oauth_state', { domain: 'localhost', path: '/' });
+  res.clearCookie('oauth_code_verifier', { domain: 'localhost', path: '/' });
 
   try {
     const { access_token, token_type } = await authService.exchangeCodeForToken(
@@ -108,17 +111,22 @@ exports.handleGitHubCallback = async (req, res) => {
     const { accessToken, refreshToken, jti } = authService.generateTokens(user.id, user.role);
     await authService.saveRefreshToken(user.id, jti);
 
+    // Set auth cookies with domain: 'localhost' so they're shared across ports
     res.cookie('access_token', accessToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      domain: 'localhost',
+      path: '/',
       maxAge: 3 * 60 * 1000
     });
 
     res.cookie('refresh_token', refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      domain: 'localhost',
+      path: '/',
       maxAge: 5 * 60 * 1000
     });
 
@@ -141,7 +149,11 @@ exports.handleGitHubCallback = async (req, res) => {
 exports.cliTokenExchange = async (req, res) => {
   const { code, code_verifier, redirect_uri } = req.body;
 
-  console.log('cliTokenExchange received:', { code: code?.slice(0,10), code_verifier: code_verifier?.slice(0,10), redirect_uri });
+  console.log('cliTokenExchange received:', {
+    code: code?.slice(0, 10) + '...',
+    code_verifier: code_verifier?.slice(0, 10) + '...',
+    redirect_uri
+  });
 
   if (!code || !code_verifier || !redirect_uri) {
     return res.status(400).json({
@@ -236,6 +248,7 @@ exports.refreshTokens = async (req, res) => {
       decoded.role
     );
 
+    // CLI — return tokens as JSON
     if (req.body?.refresh_token) {
       return res.status(200).json({
         status: 'success',
@@ -243,17 +256,22 @@ exports.refreshTokens = async (req, res) => {
       });
     }
 
+    // Web portal — update cookies
     res.cookie('access_token', accessToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      domain: 'localhost',
+      path: '/',
       maxAge: 3 * 60 * 1000
     });
 
     res.cookie('refresh_token', refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      domain: 'localhost',
+      path: '/',
       maxAge: 5 * 60 * 1000
     });
 
@@ -284,11 +302,14 @@ exports.logout = async (req, res) => {
     try {
       const decoded = jwt.verify(incomingRefreshToken, process.env.JWT_REFRESH_SECRET);
       await authService.revokeRefreshToken(decoded.jti);
-    } catch (_) {}
+    } catch (_) {
+      // Token already expired or invalid
+    }
   }
 
-  res.clearCookie('access_token');
-  res.clearCookie('refresh_token');
+  // Clear cookies
+  res.clearCookie('access_token', { domain: 'localhost', path: '/' });
+  res.clearCookie('refresh_token', { domain: 'localhost', path: '/' });
 
   return res.status(200).json({
     status: 'success',
