@@ -11,6 +11,9 @@ router.use(authLimiter);
 router.get('/github', authController.initiateGitHubAuth);
 router.get('/github/callback', authController.handleGitHubCallback);
 
+// ─── ONE-TIME TOKEN EXCHANGE (called by Next.js server-side) ─────────────────
+router.get('/exchange', authController.exchangeOneTimeToken);
+
 // ─── CLI ENDPOINTS ────────────────────────────────────────────────────────────
 router.get('/github/client-id', authController.getClientId);
 router.post('/github/token', authController.cliTokenExchange);
