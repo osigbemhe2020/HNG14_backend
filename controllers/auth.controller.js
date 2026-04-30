@@ -115,7 +115,7 @@ exports.handleGitHubCallback = async (req, res) => {
     const { accessToken, refreshToken, jti } = authService.generateTokens(user.id, user.role);
     await authService.saveRefreshToken(user.id, jti);
 
-    Generate one-time token for cross-origin portal handoff
+    //Generate one-time token for cross-origin portal handoff
     const oneTimeToken = crypto.randomBytes(32).toString('hex');
     oneTimeTokenStore.set(oneTimeToken, {
       access_token: accessToken,
