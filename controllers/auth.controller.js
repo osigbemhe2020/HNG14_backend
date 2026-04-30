@@ -21,23 +21,23 @@ exports.initiateGitHubAuth = (req, res) => {
     const { codeVerifier, codeChallenge } = authService.generatePKCE();
     const state = authService.generateState();
 
-    res.cookie('oauth_state', state, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      domain: 'localhost',
-      path: '/',
-      maxAge: 10 * 60 * 1000
-    });
+    const isProduction = process.env.NODE_ENV === 'production';
 
-    res.cookie('oauth_code_verifier', codeVerifier, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      domain: 'localhost',
-      path: '/',
-      maxAge: 10 * 60 * 1000
-    });
+res.cookie('oauth_state', state, {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-site OAuth flow
+  maxAge: 10 * 60 * 1000,
+  path: '/'
+});
+
+res.cookie('oauth_code_verifier', codeVerifier, {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  maxAge: 10 * 60 * 1000,
+  path: '/'
+});
 
     const redirectUrl = authService.buildGitHubAuthUrl(state, codeChallenge);
     return res.redirect(redirectUrl);
@@ -83,8 +83,21 @@ exports.handleGitHubCallback = async (req, res) => {
   }
 
   // Clear OAuth cookies
-  res.clearCookie('oauth_state', { domain: 'localhost', path: '/' });
-  res.clearCookie('oauth_code_verifier', { domain: 'localhost', path: '/' });
+  const isProduction = process.env.NODE_ENV === 'production';
+
+res.clearCookie('oauth_state', {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  path: '/'
+});
+
+res.clearCookie('oauth_code_verifier', {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  path: '/'
+});
 
   try {
     const { access_token, token_type } = await authService.exchangeCodeForToken(
@@ -113,22 +126,18 @@ exports.handleGitHubCallback = async (req, res) => {
 
     // Set auth cookies with domain: 'localhost' so they're shared across ports
     res.cookie('access_token', accessToken, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      domain: 'localhost',
-      path: '/',
-      maxAge: 3 * 60 * 1000
-    });
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  maxAge: 3 * 60 * 1000
+});
 
-    res.cookie('refresh_token', refreshToken, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      domain: 'localhost',
-      path: '/',
-      maxAge: 5 * 60 * 1000
-    });
+res.cookie('refresh_token', refreshToken, {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  maxAge: 5 * 60 * 1000
+});
 
     return res.redirect(`${WEB_PORTAL_URL}/dashboard`);
 
@@ -255,22 +264,22 @@ exports.refreshTokens = async (req, res) => {
         data: { access_token: accessToken, refresh_token: refreshToken }
       });
     }
-
+    const isProduction = process.env.NODE_ENV === 'production';
     // Web portal — update cookies
     res.cookie('access_token', accessToken, {
       httpOnly: true,
       secure: false,
       sameSite: 'lax',
-      domain: 'localhost',
+     secure: isProduction,
+     sameSite: isProduction ? 'none' : 'lax',
       path: '/',
       maxAge: 3 * 60 * 1000
     });
 
     res.cookie('refresh_token', refreshToken, {
       httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      domain: 'localhost',
+      secure: isProduction,
+       sameSite: isProduction ? 'none' : 'lax',
       path: '/',
       maxAge: 5 * 60 * 1000
     });
@@ -308,8 +317,21 @@ exports.logout = async (req, res) => {
   }
 
   // Clear cookies
-  res.clearCookie('access_token', { domain: 'localhost', path: '/' });
-  res.clearCookie('refresh_token', { domain: 'localhost', path: '/' });
+  const isProduction = process.env.NODE_ENV === 'production';
+
+res.clearCookie('access_token', {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  path: '/'
+});
+
+res.clearCookie('refresh_token', {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  path: '/'
+});
 
   return res.status(200).json({
     status: 'success',
