@@ -1,10 +1,34 @@
 const authService = require('../services/auth.service');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 const WEB_PORTAL_URL = process.env.WEB_PORTAL_URL || 'http://localhost:3000';
+const IS_PROD = process.env.NODE_ENV === 'production';
 
-// ─── GET GITHUB CLIENT ID (CLI needs this to build OAuth URL itself) ──────────
-// GET /auth/github/client-id
+// ─── COOKIE HELPER ────────────────────────────────────────────────────────────
+
+const cookieOptions = (maxAge) => ({
+  httpOnly: true,
+  secure: IS_PROD,
+  sameSite: IS_PROD ? 'none' : 'lax',
+  ...(maxAge && { maxAge }),
+  path: '/'
+});
+
+// ─── ONE-TIME TOKEN STORE ─────────────────────────────────────────────────────
+// Short-lived in-memory store for cross-origin portal token handoff
+// Each token expires after 60 seconds and is deleted after first use
+
+const oneTimeTokenStore = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of oneTimeTokenStore.entries()) {
+    if (value.expires < now) oneTimeTokenStore.delete(key);
+  }
+}, 60 * 1000);
+
+// ─── GET GITHUB CLIENT ID ─────────────────────────────────────────────────────
 
 exports.getClientId = (req, res) => {
   return res.status(200).json({
@@ -12,32 +36,15 @@ exports.getClientId = (req, res) => {
   });
 };
 
-// ─── INITIATE GITHUB OAUTH (Web portal only) ──────────────────────────────────
-// GET /auth/github
-// CLI does NOT use this — CLI builds the GitHub URL itself
+// ─── INITIATE GITHUB OAUTH (Web portal) ──────────────────────────────────────
 
 exports.initiateGitHubAuth = (req, res) => {
   try {
     const { codeVerifier, codeChallenge } = authService.generatePKCE();
     const state = authService.generateState();
 
-    const isProduction = process.env.NODE_ENV === 'production';
-
-res.cookie('oauth_state', state, {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-site OAuth flow
-  maxAge: 10 * 60 * 1000,
-  path: '/'
-});
-
-res.cookie('oauth_code_verifier', codeVerifier, {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  maxAge: 10 * 60 * 1000,
-  path: '/'
-});
+    res.cookie('oauth_state', state, cookieOptions(10 * 60 * 1000));
+    res.cookie('oauth_code_verifier', codeVerifier, cookieOptions(10 * 60 * 1000));
 
     const redirectUrl = authService.buildGitHubAuthUrl(state, codeChallenge);
     return res.redirect(redirectUrl);
@@ -51,9 +58,7 @@ res.cookie('oauth_code_verifier', codeVerifier, {
   }
 };
 
-// ─── HANDLE GITHUB CALLBACK (Web portal only) ─────────────────────────────────
-// GET /auth/github/callback
-// CLI does NOT use this — CLI captures its own callback on localhost
+// ─── HANDLE GITHUB CALLBACK (Web portal) ─────────────────────────────────────
 
 exports.handleGitHubCallback = async (req, res) => {
   const { code, state, error, error_description } = req.query;
@@ -82,22 +87,8 @@ exports.handleGitHubCallback = async (req, res) => {
     });
   }
 
-  // Clear OAuth cookies
-  const isProduction = process.env.NODE_ENV === 'production';
-
-res.clearCookie('oauth_state', {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  path: '/'
-});
-
-res.clearCookie('oauth_code_verifier', {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  path: '/'
-});
+  res.clearCookie('oauth_state', cookieOptions());
+  res.clearCookie('oauth_code_verifier', cookieOptions());
 
   try {
     const { access_token, token_type } = await authService.exchangeCodeForToken(
@@ -117,29 +108,23 @@ res.clearCookie('oauth_code_verifier', {
     if (!user.is_active) {
       return res.status(403).json({
         status: 'error',
-        message: 'Your account has been deactivated. Contact an administrator.'
+        message: 'Your account has been deactivated.'
       });
     }
 
     const { accessToken, refreshToken, jti } = authService.generateTokens(user.id, user.role);
     await authService.saveRefreshToken(user.id, jti);
 
-    // Set auth cookies with domain: 'localhost' so they're shared across ports
-    res.cookie('access_token', accessToken, {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  maxAge: 3 * 60 * 1000
-});
+    // Generate one-time token for cross-origin portal handoff
+    const oneTimeToken = crypto.randomBytes(32).toString('hex');
+    oneTimeTokenStore.set(oneTimeToken, {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires: Date.now() + 60 * 1000 // 60 seconds to use it
+    });
 
-res.cookie('refresh_token', refreshToken, {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  maxAge: 5 * 60 * 1000
-});
-
-    return res.redirect(`${WEB_PORTAL_URL}/dashboard`);
+    // Redirect portal to /auth/callback?token=xxx
+    return res.redirect(`${WEB_PORTAL_URL}/auth/callback?token=${oneTimeToken}`);
 
   } catch (error) {
     console.error('handleGitHubCallback error:', error.message);
@@ -150,19 +135,43 @@ res.cookie('refresh_token', refreshToken, {
   }
 };
 
+// ─── EXCHANGE ONE-TIME TOKEN ──────────────────────────────────────────────────
+// GET /auth/exchange?token=xxx
+// Called server-side by Next.js /auth/callback route
+
+exports.exchangeOneTimeToken = (req, res) => {
+  const { token } = req.query;
+
+  if (!token) {
+    return res.status(400).json({ status: 'error', message: 'Token required' });
+  }
+
+  const stored = oneTimeTokenStore.get(token);
+
+  if (!stored || stored.expires < Date.now()) {
+    oneTimeTokenStore.delete(token);
+    return res.status(401).json({
+      status: 'error',
+      message: 'Invalid or expired token — please log in again'
+    });
+  }
+
+  // Delete immediately — one-time use only
+  oneTimeTokenStore.delete(token);
+
+  return res.status(200).json({
+    status: 'success',
+    data: {
+      access_token: stored.access_token,
+      refresh_token: stored.refresh_token
+    }
+  });
+};
+
 // ─── CLI TOKEN EXCHANGE ───────────────────────────────────────────────────────
-// POST /auth/github/token
-// CLI calls this after capturing the GitHub callback on localhost
-// Body: { code, code_verifier, redirect_uri }
 
 exports.cliTokenExchange = async (req, res) => {
   const { code, code_verifier, redirect_uri } = req.body;
-
-  console.log('cliTokenExchange received:', {
-    code: code?.slice(0, 10) + '...',
-    code_verifier: code_verifier?.slice(0, 10) + '...',
-    redirect_uri
-  });
 
   if (!code || !code_verifier || !redirect_uri) {
     return res.status(400).json({
@@ -228,10 +237,7 @@ exports.refreshTokens = async (req, res) => {
     req.body?.refresh_token || req.cookies?.refresh_token;
 
   if (!incomingRefreshToken) {
-    return res.status(401).json({
-      status: 'error',
-      message: 'Refresh token required'
-    });
+    return res.status(401).json({ status: 'error', message: 'Refresh token required' });
   }
 
   try {
@@ -257,32 +263,15 @@ exports.refreshTokens = async (req, res) => {
       decoded.role
     );
 
-    // CLI — return tokens as JSON
     if (req.body?.refresh_token) {
       return res.status(200).json({
         status: 'success',
         data: { access_token: accessToken, refresh_token: refreshToken }
       });
     }
-    const isProduction = process.env.NODE_ENV === 'production';
-    // Web portal — update cookies
-    res.cookie('access_token', accessToken, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-     secure: isProduction,
-     sameSite: isProduction ? 'none' : 'lax',
-      path: '/',
-      maxAge: 3 * 60 * 1000
-    });
 
-    res.cookie('refresh_token', refreshToken, {
-      httpOnly: true,
-      secure: isProduction,
-       sameSite: isProduction ? 'none' : 'lax',
-      path: '/',
-      maxAge: 5 * 60 * 1000
-    });
+    res.cookie('access_token', accessToken, cookieOptions(3 * 60 * 1000));
+    res.cookie('refresh_token', refreshToken, cookieOptions(5 * 60 * 1000));
 
     return res.status(200).json({
       status: 'success',
@@ -311,27 +300,11 @@ exports.logout = async (req, res) => {
     try {
       const decoded = jwt.verify(incomingRefreshToken, process.env.JWT_REFRESH_SECRET);
       await authService.revokeRefreshToken(decoded.jti);
-    } catch (_) {
-      // Token already expired or invalid
-    }
+    } catch (_) {}
   }
 
-  // Clear cookies
-  const isProduction = process.env.NODE_ENV === 'production';
-
-res.clearCookie('access_token', {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  path: '/'
-});
-
-res.clearCookie('refresh_token', {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? 'none' : 'lax',
-  path: '/'
-});
+  res.clearCookie('access_token', cookieOptions());
+  res.clearCookie('refresh_token', cookieOptions());
 
   return res.status(200).json({
     status: 'success',
