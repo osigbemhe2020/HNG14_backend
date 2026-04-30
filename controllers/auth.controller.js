@@ -116,15 +116,16 @@ exports.handleGitHubCallback = async (req, res) => {
     await authService.saveRefreshToken(user.id, jti);
 
     // Generate one-time token for cross-origin portal handoff
-    const oneTimeToken = crypto.randomBytes(32).toString('hex');
-    oneTimeTokenStore.set(oneTimeToken, {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      expires: Date.now() + 60 * 1000 // 60 seconds to use it
-    });
+    // const oneTimeToken = crypto.randomBytes(32).toString('hex');
+    // oneTimeTokenStore.set(oneTimeToken, {
+    //   access_token: accessToken,
+    //   refresh_token: refreshToken,
+    //   expires: Date.now() + 60 * 1000 // 60 seconds to use it
+    // });
 
-    // Redirect portal to /auth/callback?token=xxx
-    return res.redirect(`${WEB_PORTAL_URL}/auth/callback?token=${oneTimeToken}`);
+    res.cookie('access_token', accessToken, cookieOptions(3 * 60 * 1000));
+res.cookie('refresh_token', refreshToken, cookieOptions(5 * 60 * 1000));
+return res.redirect(`${WEB_PORTAL_URL}/dashboard`);
 
   } catch (error) {
     console.error('handleGitHubCallback error:', error.message);
